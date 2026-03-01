@@ -1,0 +1,280 @@
+# Quiz App — Project Logic Summary
+
+**Stack:** Node.js (Express) · MySQL · React (Vite) · Zustand · Tailwind CSS  
+**Repo:** https://github.com/AbhayKadam57/Quiz-app-with-mysql
+
+---
+
+## 1. Architecture Overview
+
+```
+Browser (React SPA)
+      │
+      │  HTTP/REST (Axios + JWT in Authorization header)
+      ▼
+Express API Server (Node.js)
+      │
+      │  mysql2 connection pool
+      ▼
+MySQL Database (Railway)
+```
+
+The frontend is a **Single Page Application** served as a static site. All data operations go through the REST API. Authentication is stateless — a JWT token is issued on login and attached to every subsequent request.
+
+---
+
+## 2. Database Schema
+
+### `users`
+| Column | Type | Notes |
+|---|---|---|
+| id | INT PK AI | |
+| name | VARCHAR(100) | Optional — user can provide on login |
+| mobile | VARCHAR(15) UNIQUE | Primary identifier |
+| otp | VARCHAR(6) | Temporary 6-digit OTP |
+| otp_expires_at | DATETIME | OTP valid for 10 minutes |
+| is_verified | BOOLEAN | Set true after first successful OTP |
+
+### `questions`
+| Column | Type | Notes |
+|---|---|---|
+| id | INT PK AI | |
+| question_text | TEXT | The question |
+| option_a/b/c/d | VARCHAR(255) | Four choices |
+| correct_option | ENUM('A','B','C','D') | Never sent to frontend |
+| marks | INT | Points per correct answer (default 10) |
+| order_no | INT | Display order |
+
+### `quiz_sessions`
+| Column | Type | Notes |
+|---|---|---|
+| id | VARCHAR(36) PK | UUID |
+| user_id | INT FK | |
+| started_at | DATETIME | |
+| completed_at | DATETIME | |
+| total_score | INT | Accumulates as answers are submitted |
+| total_time_taken | INT | Seconds, accumulates per answer |
+| status | ENUM | `started` / `completed` / `abandoned` |
+
+### `user_answers`
+| Column | Type | Notes |
+|---|---|---|
+| id | INT PK AI | |
+| session_id | FK | |
+| question_id | FK | |
+| selected_option | ENUM('A','B','C','D') | |
+| is_correct | BOOLEAN | Set server-side |
+| time_taken | INT | Seconds taken for this question |
+
+### `leaderboard`
+| Column | Type | Notes |
+|---|---|---|
+| user_id | INT UNIQUE FK | One row per user (upserted) |
+| name | VARCHAR(100) | Refreshed on every quiz completion |
+| total_score | INT | Latest quiz score |
+| total_attempts | INT | Increments each retake |
+| accuracy | DECIMAL(5,2) | % correct, recalculated each time |
+
+---
+
+## 3. Authentication Flow (OTP-based, Passwordless)
+
+```
+User enters Name (optional) + Mobile
+         │
+         ▼
+POST /api/auth/send-otp
+  • Clean mobile (strip +91/91 prefix)
+  • Validate 10-digit number
+  • If user EXISTS → update OTP (and update name if provided)
+  • If NEW user    → INSERT with name + mobile + OTP
+  • Send OTP via Fast2SMS API
+  • OTP expires in 10 minutes
+         │
+         ▼
+User receives SMS → enters 6-digit OTP
+         │
+         ▼
+POST /api/auth/verify-otp
+  • Look up user by mobile
+  • Compare OTP + check expiry
+  • Set is_verified = true, clear OTP fields
+  • Issue JWT (userId, mobile, name) — expires in configured time
+  • Return token + user object
+         │
+         ▼
+Frontend saves token → localStorage (quiz_token, quiz_user)
+Zustand authStore hydrates from localStorage on page load
+```
+
+---
+
+## 4. Quiz Session Flow
+
+### 4a. Starting a Quiz
+```
+POST /api/session/start  (requires JWT)
+  • Check for ACTIVE session (status='started')
+    → If found: return existing sessionId (resume mode)
+  • Check for COMPLETED session
+    → If found: return 400 "already completed"
+  • Otherwise: create new quiz_sessions row (UUID, status='started')
+  → Return new sessionId
+```
+
+### 4b. Answering Questions
+```
+POST /api/session/answer  (requires JWT)
+  Body: { sessionId, questionId, selectedOption, timeTaken }
+
+  • Validate session belongs to this user and is still 'started'
+  • Check if question already answered (prevent re-submit)
+  • Fetch correct_option from questions table (NEVER exposed to frontend)
+  • Calculate: isCorrect = (selectedOption == correct_option)
+  • scoreEarned = isCorrect ? marks : 0
+  • INSERT into user_answers
+  • UPDATE quiz_sessions: total_score += scoreEarned, total_time_taken += timeTaken
+  → Return: isCorrect, correctOption, scoreEarned
+```
+
+### 4c. Completing a Quiz
+```
+POST /api/session/complete  (requires JWT)
+  Body: { sessionId }
+
+  • Validate session exists and is 'started'
+  • UPDATE status = 'completed', set completed_at
+  • Aggregate results:
+    SELECT total_score, total_time_taken, COUNT(answers), SUM(is_correct)
+  • Calculate accuracy = (correct / total_answered) * 100
+  • UPSERT leaderboard:
+    INSERT ... ON DUPLICATE KEY UPDATE name=?, total_score=?, total_attempts+1, accuracy=?
+  • Calculate rank:
+    COUNT users with higher score OR same score + faster time
+  → Return: totalScore, totalTimeTaken, totalAnswered, totalCorrect, rank
+```
+
+### 4d. Retaking a Quiz
+```
+POST /api/session/retake  (requires JWT)
+
+  • DELETE all user_answers WHERE session belongs to this user
+  • DELETE all quiz_sessions WHERE user_id = this user
+  • Create fresh quiz_sessions row (new UUID, status='started')
+  → Return new sessionId
+```
+
+---
+
+## 5. Frontend State Management (Zustand)
+
+### `authStore`
+```js
+{
+  token: string | null,   // from localStorage
+  user: object | null,    // from localStorage
+  setAuth(token, user),   // saves to localStorage + state
+  logout()                // clears localStorage + state
+}
+```
+- Hydrates automatically from localStorage on page load
+- Used by ProtectedRoute to gate access to /start, /start-quiz, /result, /leaderboard
+
+### `quizStore`
+```js
+{
+  sessionId: string | null,
+  questions: [],
+  currentIndex: 0,
+  answers: [],         // { questionId, selectedOption, isCorrect, timeTaken }
+  score: 0,
+
+  setSessionId(id),
+  setQuestions(questions),  // also resets index, answers, score
+  saveAnswer({ ... }),
+  nextQuestion(),
+  previousQuestion(),
+  reset()              // clears all quiz state
+}
+```
+
+---
+
+## 6. Frontend Page Flow
+
+```
+/ (LoginPage)
+  └── Name (optional) + mobile → Get OTP → Enter OTP → Verify
+      └── On success: setAuth(token, user) → navigate /start
+
+/start (StartPage)
+  └── On mount: GET /session/my-result to check session status
+      ├── No session (404)   → "Start a Quiz"   → POST /session/start
+      ├── status='started'   → "Resume Quiz"    → navigate /start-quiz (reuses session)
+      └── status='completed' → "Retake Quiz"    → POST /session/retake → /start-quiz
+
+/start-quiz (Quizepage → QuizStarted)
+  Quizepage:
+    └── On mount: GET /quiz/questions → setQuestions() → renders QuizStarted
+
+  QuizStarted:
+    ├── 30s per question countdown (stops when question is answered)
+    ├── Select option → Submit → POST /session/answer → saveAnswer in store
+    ├── Previous/Next navigation (Next requires current question answered)
+    └── Last question answered → "Get My Result" → navigate /result
+
+/result (ResultPage)
+  └── On mount: POST /session/complete
+      └── Shows: Score donut chart, Accuracy donut chart,
+                 Correct/Incorrect counts, Time taken, Rank
+      ├── "View Leaderboard" → /leaderboard
+      └── "Retake Quiz"      → POST /session/retake → reset store → /start
+
+/leaderboard (LeaderboardPage)
+  └── On mount: GET /session/leaderboard
+      └── Top 20 users by score DESC, accuracy DESC
+      └── Top 3 rows highlighted in gold
+```
+
+---
+
+## 7. Security Measures
+
+| Concern | Implementation |
+|---|---|
+| Authentication | JWT Bearer token on all protected routes |
+| Route protection | ProtectedRoute component checks Zustand token |
+| OTP expiry | 10-minute window, cleared after verification |
+| Answer validation | Correct option never sent to frontend; validated server-side |
+| Double-answer prevention | Checks user_answers for existing record before insert |
+| Session ownership | Every query validates user_id = req.user.userId |
+| Rate limiting | express-rate-limit middleware on all API routes |
+| 401 handling | Axios interceptor auto-clears token and redirects to login |
+
+---
+
+## 8. API Reference
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| POST | /api/auth/send-otp | No | Send OTP to mobile |
+| POST | /api/auth/verify-otp | No | Verify OTP, get JWT |
+| GET | /api/auth/me | Yes | Get current user |
+| GET | /api/quiz/questions | Yes | Get all questions |
+| POST | /api/session/start | Yes | Start new session |
+| POST | /api/session/answer | Yes | Submit one answer |
+| POST | /api/session/complete | Yes | Complete session, get results |
+| POST | /api/session/retake | Yes | Reset and start fresh |
+| GET | /api/session/my-result | Yes | Get user's latest session |
+| GET | /api/session/leaderboard | Yes | Top 20 leaderboard |
+
+---
+
+## 9. Key Design Decisions
+
+1. **OTP-based auth** — No passwords to manage; reduces friction for mobile users.
+2. **Server-side answer validation** — Correct answers never leave the server, preventing cheating.
+3. **UUID sessions** — Each quiz attempt gets a unique session ID, making retakes clean.
+4. **Leaderboard upsert** — ON DUPLICATE KEY UPDATE means one row per user, always current.
+5. **Timer stops on answer** — Once a question is answered, the countdown freezes.
+6. **Resume on reconnect** — StartPage detects active session and shows "Resume Quiz".
