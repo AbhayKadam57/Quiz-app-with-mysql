@@ -7,7 +7,7 @@ import {
   getMyResult,
   getLeaderboard,
   retakeQuiz,
-} from '../controllerts/SessionController.js';
+} from '../controllerts/Sessioncontroller.js';
 import auth from "../middleware/auth.js";
 
 // All session routes are protected
