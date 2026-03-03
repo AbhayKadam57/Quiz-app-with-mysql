@@ -8,6 +8,8 @@ const axiosInstance = axios.create({
   },
 });
 
+console.log("import.meta.VITE_API_BASE_URL",import.meta.VITE_API_BASE_URL)
+
 
 // Request interceptor — attach token automatically
 axiosInstance.interceptors.request.use(
