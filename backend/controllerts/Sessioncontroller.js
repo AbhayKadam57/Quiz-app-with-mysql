@@ -70,31 +70,36 @@ export const submitAnswer = async (req, res) => {
   const { sessionId, questionId, selectedOption, timeTaken } = req.body;
   const userId = req.user.userId;
 
-  console.log("sessionId", sessionId)
-
-  // Validate inputs
-  if (!sessionId || !questionId || !selectedOption) {
+  // Validate required fields
+  if (!sessionId || !questionId) {
     return res.status(400).json({
       success: false,
-      message: "sessionId, questionId, and selectedOption are required.",
+      message: "sessionId and questionId are required.",
     });
   }
 
+  // Normalize option safely
+  const normalizedOption =
+    selectedOption && typeof selectedOption === "string"
+      ? selectedOption.toUpperCase()
+      : null;
+
   const validOptions = ["A", "B", "C", "D"];
-  if (!validOptions.includes(selectedOption.toUpperCase())) {
-    return res
-      .status(400)
-      .json({
-        success: false,
-        message: "selectedOption must be A, B, C, or D.",
-      });
+
+  // Validate only if option exists
+  if (normalizedOption && !validOptions.includes(normalizedOption)) {
+    return res.status(400).json({
+      success: false,
+      message: "selectedOption must be A, B, C, or D.",
+    });
   }
 
   try {
-    // Validate session belongs to this user and is active
+    // Validate session
     const [session] = await db.query(
-      `SELECT * FROM quiz_sessions WHERE id = ? AND user_id = ? AND status = 'started'`,
-      [sessionId, userId],
+      `SELECT * FROM quiz_sessions 
+       WHERE id = ? AND user_id = ? AND status = 'started'`,
+      [sessionId, userId]
     );
 
     if (session.length === 0) {
@@ -104,79 +109,92 @@ export const submitAnswer = async (req, res) => {
       });
     }
 
-    // Check if this question was already answered
+    // Prevent double answer
     const [existing] = await db.query(
-      `SELECT id FROM user_answers WHERE session_id = ? AND question_id = ?`,
-      [sessionId, questionId],
+      `SELECT id FROM user_answers 
+       WHERE session_id = ? AND question_id = ?`,
+      [sessionId, questionId]
     );
 
     if (existing.length > 0) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "This question has already been answered.",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "This question has already been answered.",
+      });
     }
 
-    // Get correct answer from DB (never expose this to frontend)
+    // Get question
     const [question] = await db.query(
       `SELECT correct_option, marks FROM questions WHERE id = ?`,
-      [questionId],
+      [questionId]
     );
 
     if (question.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Question not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Question not found.",
+      });
     }
 
-    const isCorrect =
-      question[0].correct_option === selectedOption.toUpperCase();
-    const scoreEarned = isCorrect ? question[0].marks : 0;
-    const timeSpent = timeTaken || 0;
+    const correctOption = question[0].correct_option;
 
-    // Save the answer
+    // Determine correctness
+    const isCorrect =
+      normalizedOption !== null && correctOption === normalizedOption;
+
+    const scoreEarned = isCorrect ? question[0].marks : 0;
+    const timeSpent = Number(timeTaken) || 0;
+
+    // Save answer
     await db.query(
-      `INSERT INTO user_answers (session_id, question_id, selected_option, is_correct, time_taken)
+      `INSERT INTO user_answers 
+       (session_id, question_id, selected_option, is_correct, time_taken)
        VALUES (?, ?, ?, ?, ?)`,
       [
         sessionId,
         questionId,
-        selectedOption.toUpperCase(),
+        normalizedOption, // safe value
         isCorrect,
         timeSpent,
-      ],
+      ]
     );
 
-    // Update session score and total time
+    // Update session totals
     await db.query(
       `UPDATE quiz_sessions
-       SET total_score = total_score + ?, total_time_taken = total_time_taken + ?
+       SET total_score = total_score + ?, 
+           total_time_taken = total_time_taken + ?
        WHERE id = ?`,
-      [scoreEarned, timeSpent, sessionId],
+      [scoreEarned, timeSpent, sessionId]
     );
 
-    // Count how many questions have been answered
+    // Count answered questions
     const [answered] = await db.query(
-      `SELECT COUNT(*) AS count FROM user_answers WHERE session_id = ?`,
-      [sessionId],
+      `SELECT COUNT(*) AS count 
+       FROM user_answers 
+       WHERE session_id = ?`,
+      [sessionId]
     );
-    const answeredCount = answered[0].count;
 
     res.status(200).json({
       success: true,
       isCorrect,
-      correctOption: question[0].correct_option,
+      correctOption,
       scoreEarned,
-      answeredCount,
-      message: isCorrect ? "✅ Correct!" : "❌ Wrong answer!",
+      answeredCount: answered[0].count,
+      message:
+        normalizedOption === null
+          ? "⏰ Time's up! Marked as wrong."
+          : isCorrect
+          ? "✅ Correct!"
+          : "❌ Wrong answer!",
     });
   } catch (err) {
-    console.error("submitAnswer Error:", err.message);
-    res
-      .status(500)
-      .json({ success: false, message: "Error submitting answer." });
+    console.error("submitAnswer Error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Error submitting answer.",
+    });
   }
 };
 
@@ -235,17 +253,17 @@ export const completeSession = async (req, res) => {
     );
 
     // Get user info
-    const [userInfo] = await db.query(
-      `SELECT name FROM users WHERE id = ?`,
-      [userId],
-    );
+    const [userInfo] = await db.query(`SELECT name FROM users WHERE id = ?`, [
+      userId,
+    ]);
 
     // Calculate accuracy
     const totalAnswered = result[0].total_answered || 0;
     const totalCorrect = result[0].total_correct || 0;
-    const accuracy = totalAnswered > 0 ? ((totalCorrect / totalAnswered) * 100).toFixed(2) : 0;
+    const accuracy =
+      totalAnswered > 0 ? ((totalCorrect / totalAnswered) * 100).toFixed(2) : 0;
 
-    const userName = userInfo[0]?.name?.trim() || 'Anonymous';
+    const userName = userInfo[0]?.name?.trim() || "Anonymous";
 
     // Update or insert leaderboard
     await db.query(
@@ -256,7 +274,15 @@ export const completeSession = async (req, res) => {
        total_score = ?,
        total_attempts = total_attempts + 1,
        accuracy = ?`,
-      [userId, userName, result[0].total_score, accuracy, userName, result[0].total_score, accuracy],
+      [
+        userId,
+        userName,
+        result[0].total_score,
+        accuracy,
+        userName,
+        result[0].total_score,
+        accuracy,
+      ],
     );
 
     // Get user rank from leaderboard
@@ -330,9 +356,11 @@ export const getMyResult = async (req, res) => {
 // ─────────────────────────────────────────────
 export const getLeaderboard = async (req, res) => {
   try {
-    const [rows] = await db.query(`SELECT * FROM leaderboard ORDER BY total_score DESC, accuracy DESC LIMIT 20`);
+    const [rows] = await db.query(
+      `SELECT * FROM leaderboard ORDER BY total_score DESC, accuracy DESC LIMIT 20`,
+    );
 
-    console.log("leaderboard rows", rows)
+    console.log("leaderboard rows", rows);
 
     res.status(200).json({
       success: true,
@@ -360,20 +388,17 @@ export const retakeQuiz = async (req, res) => {
       `DELETE ua FROM user_answers ua
        INNER JOIN quiz_sessions qs ON ua.session_id = qs.id
        WHERE qs.user_id = ?`,
-      [userId]
+      [userId],
     );
 
     // Delete all quiz sessions for this user
-    await db.query(
-      `DELETE FROM quiz_sessions WHERE user_id = ?`,
-      [userId]
-    );
+    await db.query(`DELETE FROM quiz_sessions WHERE user_id = ?`, [userId]);
 
     // Create a fresh session
     const sessionId = uuidv4();
     await db.query(
       `INSERT INTO quiz_sessions (id, user_id, started_at, status) VALUES (?, ?, NOW(), 'started')`,
-      [sessionId, userId]
+      [sessionId, userId],
     );
 
     res.status(201).json({
@@ -383,8 +408,6 @@ export const retakeQuiz = async (req, res) => {
     });
   } catch (err) {
     console.error("retakeQuiz Error:", err.message);
-    res
-      .status(500)
-      .json({ success: false, message: "Error retaking quiz." });
+    res.status(500).json({ success: false, message: "Error retaking quiz." });
   }
 };

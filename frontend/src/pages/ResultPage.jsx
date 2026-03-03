@@ -142,7 +142,7 @@ const ResultPage = () => {
               {/* Total Score */}
               <ChartPieDonut
                 total={100}
-                score={correctCount * 10 || score || 80}
+                score={correctCount * 10 || score || 0}
                 title="Total score"
                 subtitle="Showing total score for latest quiz"
               />

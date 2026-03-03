@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS user_answers (
   id INT AUTO_INCREMENT PRIMARY KEY,
   session_id VARCHAR(36),
   question_id INT,
-  selected_option ENUM('A','B','C','D'),
+  selected_option ENUM('A','B','C','D') DEFAULT NULL,
   is_correct BOOLEAN,
   time_taken INT,
   answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

@@ -56,6 +56,48 @@ const QuizStarted = () => {
     return () => clearTimeout(timer);
   }, [timeLeft, answeredQuestion]);
 
+  const autoSubmitWrong = async () => {
+  if (!currentQuestion) return;
+
+  try {
+    setIsSubmitting(true);
+
+    const response = await submitAnswer({
+      sessionId,
+      questionId: currentQuestion.id,
+      selectedOption: null, // No option selected
+      timeTaken: 30,
+    });
+
+    // Save as wrong
+    saveAnswer({
+      questionId: currentQuestion.id,
+      selectedOption: null,
+      isCorrect: false,
+      timeTaken: 30,
+      scoreEarned: 0,
+    });
+
+    toast.error("Time's up! Moving to next question.", {
+      position: "top-center",
+    });
+
+    if (!isLastQuestion) {
+      nextQuestion();
+    }
+  } catch (error) {
+    console.error("Auto submit error:", error);
+  } finally {
+    setIsSubmitting(false);
+  }
+};
+
+useEffect(() => {
+  if (timeLeft === 0 && !answeredQuestion && !isSubmitting) {
+    autoSubmitWrong();
+  }
+}, [timeLeft]);
+
   // Show loading while questions are being fetched
   if (!isReady || !questions || questions.length === 0) {
     return (
@@ -155,6 +197,12 @@ const QuizStarted = () => {
   const handleGetResult = () => {
     navigate("/result");
   };
+
+  // useEffect(() => {
+  //   if (timeLeft == 30) {
+  //     nextQuestion();
+  //   }
+  // }, [timeLeft]);
 
   const progressPercent = ((currentIndex + 1) / totalQuestions) * 100;
   const timerColor = timeLeft <= 10 ? "text-red-600" : "text-[#2c8c72]";
