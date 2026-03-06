@@ -1,46 +1,92 @@
-// const db = require('../config/db');
-// const { v4: uuidv4 } = require('uuid');
 import db from "../config/db.js";
 import { v4 as uuidv4 } from "uuid";
 
-// ─────────────────────────────────────────────
-// POST /api/session/start  (Protected)
-// Starts a new quiz session for the user
-// ─────────────────────────────────────────────
+const DAILY_ATTEMPT_LIMIT = 3;
+let leaderboardColumnsEnsured = false;
+
+const ensureLeaderboardColumns = async () => {
+  if (leaderboardColumnsEnsured) return;
+
+  const [bestTimeCol] = await db.query(
+    `SHOW COLUMNS FROM leaderboard LIKE 'best_time_taken'`,
+  );
+  if (bestTimeCol.length === 0) {
+    await db.query(
+      `ALTER TABLE leaderboard ADD COLUMN best_time_taken INT DEFAULT 999999`,
+    );
+  }
+
+  const [bestRecordedCol] = await db.query(
+    `SHOW COLUMNS FROM leaderboard LIKE 'best_recorded_at'`,
+  );
+  if (bestRecordedCol.length === 0) {
+    await db.query(
+      `ALTER TABLE leaderboard ADD COLUMN best_recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
+    );
+  }
+
+  leaderboardColumnsEnsured = true;
+};
+
+const getCompletedAttemptCountToday = async (userId) => {
+  const [rows] = await db.query(
+    `SELECT COUNT(*) AS attempts
+     FROM quiz_sessions
+     WHERE user_id = ?
+       AND DATE(started_at) = CURDATE()
+       AND status = 'completed'`,
+    [userId],
+  );
+
+  return rows[0]?.attempts || 0;
+};
+
+const getActiveSessionToday = async (userId) => {
+  const [rows] = await db.query(
+    `SELECT id
+     FROM quiz_sessions
+     WHERE user_id = ?
+       AND status = 'started'
+       AND DATE(started_at) = CURDATE()
+     ORDER BY started_at DESC
+     LIMIT 1`,
+    [userId],
+  );
+
+  return rows[0] || null;
+};
+
+const getDailyLimitPayload = (attempts) => ({
+  attemptsToday: attempts,
+  attemptsRemaining: Math.max(0, DAILY_ATTEMPT_LIMIT - attempts),
+  dailyLimit: DAILY_ATTEMPT_LIMIT,
+});
+
 export const startSession = async (req, res) => {
   const userId = req.user.userId;
 
   try {
-    // Check if user already has an active session
-    const [active] = await db.query(
-      `SELECT id FROM quiz_sessions WHERE user_id = ? AND status = 'started'`,
-      [userId],
-    );
+    const activeToday = await getActiveSessionToday(userId);
+    const completedToday = await getCompletedAttemptCountToday(userId);
 
-    if (active.length > 0) {
+    if (activeToday) {
       return res.status(200).json({
         success: true,
         message: "Resuming existing session.",
-        sessionId: active[0].id,
+        sessionId: activeToday.id,
         isResumed: true,
+        ...getDailyLimitPayload(completedToday + 1),
       });
     }
 
-    // Check if user already completed the quiz
-    const [completed] = await db.query(
-      `SELECT id, total_score FROM quiz_sessions WHERE user_id = ? AND status = 'completed'`,
-      [userId],
-    );
-
-    if (completed.length > 0) {
-      return res.status(400).json({
+    if (completedToday >= DAILY_ATTEMPT_LIMIT) {
+      return res.status(429).json({
         success: false,
-        message: "You have already completed this quiz.",
-        totalScore: completed[0].total_score,
+        message: "Daily quiz limit reached. You can play again tomorrow.",
+        ...getDailyLimitPayload(completedToday),
       });
     }
 
-    // Create new session
     const sessionId = uuidv4();
     await db.query(
       `INSERT INTO quiz_sessions (id, user_id, started_at, status) VALUES (?, ?, NOW(), 'started')`,
@@ -49,28 +95,21 @@ export const startSession = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: "Quiz session started!",
+      message: "New IPL quiz attempt started!",
       sessionId,
       isResumed: false,
+      ...getDailyLimitPayload(completedToday + 1),
     });
   } catch (err) {
     console.error("startSession Error:", err.message);
-    res
-      .status(500)
-      .json({ success: false, message: "Error starting session." });
+    res.status(500).json({ success: false, message: "Error starting session." });
   }
 };
 
-// ─────────────────────────────────────────────
-// POST /api/session/answer  (Protected)
-// Submit answer for a single question
-// Body: { sessionId, questionId, selectedOption, timeTaken }
-// ─────────────────────────────────────────────
 export const submitAnswer = async (req, res) => {
   const { sessionId, questionId, selectedOption, timeTaken } = req.body;
   const userId = req.user.userId;
 
-  // Validate required fields
   if (!sessionId || !questionId) {
     return res.status(400).json({
       success: false,
@@ -78,15 +117,12 @@ export const submitAnswer = async (req, res) => {
     });
   }
 
-  // Normalize option safely
   const normalizedOption =
     selectedOption && typeof selectedOption === "string"
       ? selectedOption.toUpperCase()
       : null;
 
   const validOptions = ["A", "B", "C", "D"];
-
-  // Validate only if option exists
   if (normalizedOption && !validOptions.includes(normalizedOption)) {
     return res.status(400).json({
       success: false,
@@ -95,11 +131,10 @@ export const submitAnswer = async (req, res) => {
   }
 
   try {
-    // Validate session
     const [session] = await db.query(
-      `SELECT * FROM quiz_sessions 
+      `SELECT * FROM quiz_sessions
        WHERE id = ? AND user_id = ? AND status = 'started'`,
-      [sessionId, userId]
+      [sessionId, userId],
     );
 
     if (session.length === 0) {
@@ -109,11 +144,10 @@ export const submitAnswer = async (req, res) => {
       });
     }
 
-    // Prevent double answer
     const [existing] = await db.query(
-      `SELECT id FROM user_answers 
+      `SELECT id FROM user_answers
        WHERE session_id = ? AND question_id = ?`,
-      [sessionId, questionId]
+      [sessionId, questionId],
     );
 
     if (existing.length > 0) {
@@ -123,10 +157,9 @@ export const submitAnswer = async (req, res) => {
       });
     }
 
-    // Get question
     const [question] = await db.query(
       `SELECT correct_option, marks FROM questions WHERE id = ?`,
-      [questionId]
+      [questionId],
     );
 
     if (question.length === 0) {
@@ -137,43 +170,30 @@ export const submitAnswer = async (req, res) => {
     }
 
     const correctOption = question[0].correct_option;
-
-    // Determine correctness
-    const isCorrect =
-      normalizedOption !== null && correctOption === normalizedOption;
-
+    const isCorrect = normalizedOption !== null && correctOption === normalizedOption;
     const scoreEarned = isCorrect ? question[0].marks : 0;
     const timeSpent = Number(timeTaken) || 0;
 
-    // Save answer
     await db.query(
-      `INSERT INTO user_answers 
+      `INSERT INTO user_answers
        (session_id, question_id, selected_option, is_correct, time_taken)
        VALUES (?, ?, ?, ?, ?)`,
-      [
-        sessionId,
-        questionId,
-        normalizedOption, // safe value
-        isCorrect,
-        timeSpent,
-      ]
+      [sessionId, questionId, normalizedOption, isCorrect, timeSpent],
     );
 
-    // Update session totals
     await db.query(
       `UPDATE quiz_sessions
-       SET total_score = total_score + ?, 
+       SET total_score = total_score + ?,
            total_time_taken = total_time_taken + ?
        WHERE id = ?`,
-      [scoreEarned, timeSpent, sessionId]
+      [scoreEarned, timeSpent, sessionId],
     );
 
-    // Count answered questions
     const [answered] = await db.query(
-      `SELECT COUNT(*) AS count 
-       FROM user_answers 
+      `SELECT COUNT(*) AS count
+       FROM user_answers
        WHERE session_id = ?`,
-      [sessionId]
+      [sessionId],
     );
 
     res.status(200).json({
@@ -182,51 +202,35 @@ export const submitAnswer = async (req, res) => {
       correctOption,
       scoreEarned,
       answeredCount: answered[0].count,
-      message:
-        normalizedOption === null
-          ? "⏰ Time's up! Marked as wrong."
-          : isCorrect
-          ? "✅ Correct!"
-          : "❌ Wrong answer!",
+      message: "Answer submitted.",
     });
   } catch (err) {
     console.error("submitAnswer Error:", err);
-    res.status(500).json({
-      success: false,
-      message: "Error submitting answer.",
-    });
+    res.status(500).json({ success: false, message: "Error submitting answer." });
   }
 };
 
-// ─────────────────────────────────────────────
-// POST /api/session/complete  (Protected)
-// Mark quiz as completed and get final score
-// Body: { sessionId }
-// ─────────────────────────────────────────────
 export const completeSession = async (req, res) => {
   const { sessionId } = req.body;
   const userId = req.user.userId;
 
   if (!sessionId) {
-    return res
-      .status(400)
-      .json({ success: false, message: "sessionId is required." });
+    return res.status(400).json({ success: false, message: "sessionId is required." });
   }
 
   try {
-    // Validate session
+    await ensureLeaderboardColumns();
+
     const [session] = await db.query(
       `SELECT * FROM quiz_sessions WHERE id = ? AND user_id = ?`,
       [sessionId, userId],
     );
 
     if (session.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Session not found." });
+      return res.status(404).json({ success: false, message: "Session not found." });
     }
 
-    if (session[0].status === "completed") {
+    if (session[0].status !== "started") {
       return res.status(400).json({
         success: false,
         message: "Session already completed.",
@@ -234,13 +238,11 @@ export const completeSession = async (req, res) => {
       });
     }
 
-    // Mark as completed
     await db.query(
       `UPDATE quiz_sessions SET status = 'completed', completed_at = NOW() WHERE id = ?`,
       [sessionId],
     );
 
-    // Get final result
     const [result] = await db.query(
       `SELECT qs.total_score, qs.total_time_taken,
               COUNT(ua.id) AS total_answered,
@@ -252,55 +254,86 @@ export const completeSession = async (req, res) => {
       [sessionId],
     );
 
-    // Get user info
-    const [userInfo] = await db.query(`SELECT name FROM users WHERE id = ?`, [
-      userId,
-    ]);
-
-    // Calculate accuracy
+    const [userInfo] = await db.query(`SELECT name FROM users WHERE id = ?`, [userId]);
     const totalAnswered = result[0].total_answered || 0;
     const totalCorrect = result[0].total_correct || 0;
-    const accuracy =
-      totalAnswered > 0 ? ((totalCorrect / totalAnswered) * 100).toFixed(2) : 0;
-
+    const accuracy = totalAnswered > 0 ? Number(((totalCorrect / totalAnswered) * 100).toFixed(2)) : 0;
     const userName = userInfo[0]?.name?.trim() || "Anonymous";
+    const totalTimeTaken = result[0].total_time_taken || 0;
 
-    // Update or insert leaderboard
     await db.query(
-      `INSERT INTO leaderboard (user_id, name, total_score, total_attempts, accuracy)
-       VALUES (?, ?, ?, 1, ?)
+      `INSERT INTO leaderboard (user_id, name, total_score, total_attempts, accuracy, best_time_taken, best_recorded_at)
+       VALUES (?, ?, ?, 1, ?, ?, NOW())
        ON DUPLICATE KEY UPDATE
-       name = ?,
-       total_score = ?,
+       name = VALUES(name),
        total_attempts = total_attempts + 1,
-       accuracy = ?`,
-      [
-        userId,
-        userName,
-        result[0].total_score,
-        accuracy,
-        userName,
-        result[0].total_score,
-        accuracy,
-      ],
+       total_score = CASE
+         WHEN VALUES(total_score) > total_score THEN VALUES(total_score)
+         WHEN VALUES(total_score) = total_score AND VALUES(accuracy) > accuracy THEN VALUES(total_score)
+         WHEN VALUES(total_score) = total_score AND VALUES(accuracy) = accuracy AND VALUES(best_time_taken) < best_time_taken THEN VALUES(total_score)
+         ELSE total_score
+       END,
+       accuracy = CASE
+         WHEN VALUES(total_score) > total_score THEN VALUES(accuracy)
+         WHEN VALUES(total_score) = total_score AND VALUES(accuracy) > accuracy THEN VALUES(accuracy)
+         WHEN VALUES(total_score) = total_score AND VALUES(accuracy) = accuracy AND VALUES(best_time_taken) < best_time_taken THEN VALUES(accuracy)
+         ELSE accuracy
+       END,
+       best_time_taken = CASE
+         WHEN VALUES(total_score) > total_score THEN VALUES(best_time_taken)
+         WHEN VALUES(total_score) = total_score AND VALUES(accuracy) > accuracy THEN VALUES(best_time_taken)
+         WHEN VALUES(total_score) = total_score AND VALUES(accuracy) = accuracy AND VALUES(best_time_taken) < best_time_taken THEN VALUES(best_time_taken)
+         ELSE best_time_taken
+       END,
+       best_recorded_at = CASE
+         WHEN VALUES(total_score) > total_score THEN NOW()
+         WHEN VALUES(total_score) = total_score AND VALUES(accuracy) > accuracy THEN NOW()
+         WHEN VALUES(total_score) = total_score AND VALUES(accuracy) = accuracy AND VALUES(best_time_taken) < best_time_taken THEN NOW()
+         ELSE best_recorded_at
+       END`,
+      [userId, userName, result[0].total_score, accuracy, totalTimeTaken],
     );
 
-    // Get user rank from leaderboard
+    const [myStanding] = await db.query(
+      `SELECT user_id, total_score, accuracy, best_time_taken, best_recorded_at
+       FROM leaderboard
+       WHERE user_id = ?`,
+      [userId],
+    );
+
+    const me = myStanding[0];
     const [rank] = await db.query(
       `SELECT COUNT(*) + 1 AS user_rank
-       FROM quiz_sessions
-       WHERE status = 'completed'
-         AND (total_score > ? OR (total_score = ? AND total_time_taken < ?))`,
+       FROM leaderboard
+       WHERE total_score > ?
+          OR (total_score = ? AND accuracy > ?)
+          OR (total_score = ? AND accuracy = ? AND best_time_taken < ?)
+          OR (total_score = ? AND accuracy = ? AND best_time_taken = ? AND best_recorded_at < ?)
+          OR (total_score = ? AND accuracy = ? AND best_time_taken = ? AND best_recorded_at = ? AND user_id < ?)`,
       [
-        result[0].total_score,
-        result[0].total_score,
-        result[0].total_time_taken,
+        me.total_score,
+        me.total_score,
+        me.accuracy,
+        me.total_score,
+        me.accuracy,
+        me.best_time_taken,
+        me.total_score,
+        me.accuracy,
+        me.best_time_taken,
+        me.best_recorded_at,
+        me.total_score,
+        me.accuracy,
+        me.best_time_taken,
+        me.best_recorded_at,
+        me.user_id,
       ],
     );
+
+    const completedToday = await getCompletedAttemptCountToday(userId);
 
     res.status(200).json({
       success: true,
-      message: "Quiz completed! 🎉",
+      message: "Quiz completed!",
       result: {
         totalScore: result[0].total_score,
         totalTimeTaken: result[0].total_time_taken,
@@ -309,19 +342,14 @@ export const completeSession = async (req, res) => {
         totalQuestions: 10,
         rank: rank[0].user_rank,
       },
+      ...getDailyLimitPayload(completedToday),
     });
   } catch (err) {
     console.error("completeSession Error:", err.message);
-    res
-      .status(500)
-      .json({ success: false, message: "Error completing session." });
+    res.status(500).json({ success: false, message: "Error completing session." });
   }
 };
 
-// ─────────────────────────────────────────────
-// GET /api/session/my-result  (Protected)
-// Get the logged-in user's result
-// ─────────────────────────────────────────────
 export const getMyResult = async (req, res) => {
   const userId = req.user.userId;
 
@@ -338,29 +366,34 @@ export const getMyResult = async (req, res) => {
     );
 
     if (sessions.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "No quiz session found." });
+      return res.status(404).json({ success: false, message: "No quiz session found." });
     }
 
-    res.status(200).json({ success: true, result: sessions[0] });
+    const completedToday = await getCompletedAttemptCountToday(userId);
+    const activeToday = await getActiveSessionToday(userId);
+    const attemptsToday = completedToday + (activeToday ? 1 : 0);
+
+    res.status(200).json({
+      success: true,
+      result: sessions[0],
+      ...getDailyLimitPayload(attemptsToday),
+    });
   } catch (err) {
     console.error("getMyResult Error:", err.message);
     res.status(500).json({ success: false, message: "Error fetching result." });
   }
 };
 
-// ─────────────────────────────────────────────
-// GET /api/session/leaderboard  (Protected)
-// Top 20 scorers
-// ─────────────────────────────────────────────
 export const getLeaderboard = async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `SELECT * FROM leaderboard ORDER BY total_score DESC, accuracy DESC LIMIT 20`,
-    );
+    await ensureLeaderboardColumns();
 
-    console.log("leaderboard rows", rows);
+    const [rows] = await db.query(
+      `SELECT user_id, name, total_score, total_attempts, accuracy, best_time_taken, best_recorded_at, updated_at
+       FROM leaderboard
+       ORDER BY total_score DESC, accuracy DESC, best_time_taken ASC, best_recorded_at ASC, user_id ASC
+       LIMIT 20`,
+    );
 
     res.status(200).json({
       success: true,
@@ -369,32 +402,35 @@ export const getLeaderboard = async (req, res) => {
     });
   } catch (err) {
     console.error("getLeaderboard Error:", err.message);
-    res
-      .status(500)
-      .json({ success: false, message: "Error fetching leaderboard." });
+    res.status(500).json({ success: false, message: "Error fetching leaderboard." });
   }
 };
 
-// ─────────────────────────────────────────────
-// POST /api/session/retake  (Protected)
-// Delete old sessions/answers and start a fresh session
-// ─────────────────────────────────────────────
 export const retakeQuiz = async (req, res) => {
   const userId = req.user.userId;
 
   try {
-    // Delete all user_answers tied to this user's sessions
-    await db.query(
-      `DELETE ua FROM user_answers ua
-       INNER JOIN quiz_sessions qs ON ua.session_id = qs.id
-       WHERE qs.user_id = ?`,
-      [userId],
-    );
+    const activeToday = await getActiveSessionToday(userId);
+    const completedToday = await getCompletedAttemptCountToday(userId);
 
-    // Delete all quiz sessions for this user
-    await db.query(`DELETE FROM quiz_sessions WHERE user_id = ?`, [userId]);
+    if (activeToday) {
+      return res.status(200).json({
+        success: true,
+        message: "Resuming existing session.",
+        sessionId: activeToday.id,
+        isResumed: true,
+        ...getDailyLimitPayload(completedToday + 1),
+      });
+    }
 
-    // Create a fresh session
+    if (completedToday >= DAILY_ATTEMPT_LIMIT) {
+      return res.status(429).json({
+        success: false,
+        message: "Daily quiz limit reached. You can play again tomorrow.",
+        ...getDailyLimitPayload(completedToday),
+      });
+    }
+
     const sessionId = uuidv4();
     await db.query(
       `INSERT INTO quiz_sessions (id, user_id, started_at, status) VALUES (?, ?, NOW(), 'started')`,
@@ -403,11 +439,13 @@ export const retakeQuiz = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: "Quiz session reset! Good luck! 🎉",
+      message: "New attempt started.",
       sessionId,
+      isResumed: false,
+      ...getDailyLimitPayload(completedToday + 1),
     });
   } catch (err) {
     console.error("retakeQuiz Error:", err.message);
-    res.status(500).json({ success: false, message: "Error retaking quiz." });
+    res.status(500).json({ success: false, message: "Error starting a new attempt." });
   }
 };

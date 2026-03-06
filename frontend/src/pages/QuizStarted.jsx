@@ -1,12 +1,22 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Clock, ChevronLeft, ChevronRight } from "lucide-react";
+import { Clock, ChevronLeft, ChevronRight, Flame, Sparkles } from "lucide-react";
 import useQuizStore from "@/store/quizStore";
 import { submitAnswer } from "@/api/sessionApi";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
+
+const MILESTONE_MAP = {
+  2: { label: "Powerplay On", tone: "powerplay" },
+  3: { label: "Hat-trick", tone: "hattrick" },
+  5: { label: "Half-century Streak", tone: "fifty" },
+  7: { label: "Super Over Surge", tone: "super" },
+  10: { label: "Perfect Innings", tone: "perfect" },
+};
+
+const CONFETTI_COLORS = ["#f59e0b", "#22c55e", "#3b82f6", "#ef4444", "#eab308"];
 
 const QuizStarted = () => {
   const navigate = useNavigate();
@@ -21,10 +31,8 @@ const QuizStarted = () => {
     questions,
   } = store;
 
-  // Compute derived values directly from state (not from getters)
-  const currentQuestion =
-    questions && questions.length > 0 ? questions[currentIndex] : null;
-  const totalQuestions = questions ? questions.length : 0;
+  const currentQuestion = questions?.length ? questions[currentIndex] : null;
+  const totalQuestions = questions?.length || 0;
   const isLastQuestion = currentIndex === totalQuestions - 1;
   const isFirstQuestion = currentIndex === 0;
   const answeredQuestion = currentQuestion
@@ -35,9 +43,12 @@ const QuizStarted = () => {
   const [timeLeft, setTimeLeft] = useState(30);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isReady, setIsReady] = useState(false);
+  const [currentStreak, setCurrentStreak] = useState(0);
+  const [maxStreak, setMaxStreak] = useState(0);
+  const [milestone, setMilestone] = useState(null);
 
   useEffect(() => {
-    if (questions && questions.length > 0) {
+    if (questions?.length) {
       setIsReady(true);
     }
   }, [questions]);
@@ -50,84 +61,77 @@ const QuizStarted = () => {
   }, [currentIndex]);
 
   useEffect(() => {
-    // Stop timer if question already answered or time is up
     if (timeLeft <= 0 || answeredQuestion) return;
-    const timer = setTimeout(() => setTimeLeft(timeLeft - 1), 1000);
+    const timer = setTimeout(() => setTimeLeft((prev) => prev - 1), 1000);
     return () => clearTimeout(timer);
   }, [timeLeft, answeredQuestion]);
 
-  const autoSubmitWrong = async () => {
-  if (!currentQuestion) return;
+  useEffect(() => {
+    if (!milestone) return;
+    const timeout = setTimeout(() => setMilestone(null), 1800);
+    return () => clearTimeout(timeout);
+  }, [milestone]);
 
-  try {
-    setIsSubmitting(true);
+  const showMilestone = (nextStreak) => {
+    const hit = MILESTONE_MAP[nextStreak];
+    if (!hit) return;
 
-    const response = await submitAnswer({
-      sessionId,
-      questionId: currentQuestion.id,
-      selectedOption: null, // No option selected
-      timeTaken: 30,
-    });
+    setMilestone(hit);
+    const message = nextStreak === 3 ? "Hat-trick! 3 correct in a row." : `${hit.label}! ${nextStreak} in a row.`;
+    toast.success(message, { position: "top-center" });
+  };
 
-    // Save as wrong
-    saveAnswer({
-      questionId: currentQuestion.id,
-      selectedOption: null,
-      isCorrect: false,
-      timeTaken: 30,
-      scoreEarned: 0,
-    });
-
-    toast.error("Time's up! Moving to next question.", {
-      position: "top-center",
-    });
-
-    if (!isLastQuestion) {
-      nextQuestion();
+  const handleStreakUpdate = (isCorrect) => {
+    if (isCorrect) {
+      const nextStreak = currentStreak + 1;
+      setCurrentStreak(nextStreak);
+      setMaxStreak((prev) => Math.max(prev, nextStreak));
+      showMilestone(nextStreak);
+      return;
     }
-  } catch (error) {
-    console.error("Auto submit error:", error);
-  } finally {
-    setIsSubmitting(false);
-  }
-};
 
-useEffect(() => {
-  if (timeLeft === 0 && !answeredQuestion && !isSubmitting) {
-    autoSubmitWrong();
-  }
-}, [timeLeft]);
+    setCurrentStreak(0);
+  };
 
-  // Show loading while questions are being fetched
-  if (!isReady || !questions || questions.length === 0) {
-    return (
-      <div className="min-h-screen bg-[#e8ebea] flex items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-[#2c8c72] mb-4"></div>
-          <p className="text-xl font-semibold text-gray-700">
-            Loading questions...
-          </p>
-        </div>
-      </div>
-    );
-  }
+  const autoSubmitWrong = async () => {
+    if (!currentQuestion) return;
 
-  // Defensive: If currentQuestion is null, show error and prevent option rendering crash
-  if (
-    isReady &&
-    (!currentQuestion || Object.keys(currentQuestion).length === 0)
-  ) {
-    return (
-      <div className="min-h-screen bg-[#e8ebea] flex items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-[#2c8c72] mb-4"></div>
-          <p className="text-xl font-semibold text-red-600">
-            No question found. Please try again.
-          </p>
-        </div>
-      </div>
-    );
-  }
+    try {
+      setIsSubmitting(true);
+
+      await submitAnswer({
+        sessionId,
+        questionId: currentQuestion.id,
+        selectedOption: null,
+        timeTaken: 30,
+      });
+
+      saveAnswer({
+        questionId: currentQuestion.id,
+        selectedOption: null,
+        isCorrect: false,
+        timeTaken: 30,
+        scoreEarned: 0,
+      });
+
+      handleStreakUpdate(false);
+
+      if (!isLastQuestion) {
+        nextQuestion();
+      }
+    } catch (error) {
+      console.error("Auto submit error:", error);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (timeLeft === 0 && !answeredQuestion && !isSubmitting) {
+      autoSubmitWrong();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeLeft]);
 
   const handleSubmitAnswer = async () => {
     if (!selectedOption) {
@@ -145,29 +149,19 @@ useEffect(() => {
         timeTaken: 30 - timeLeft,
       });
 
-      console.log("Submit answer response:", response);
-
       if (response.success) {
-        const isCorrect = response.isCorrect;
         saveAnswer({
           questionId: currentQuestion?.id,
           selectedOption,
-          isCorrect,
+          isCorrect: response.isCorrect,
           timeTaken: 30 - timeLeft,
           scoreEarned: response.scoreEarned,
         });
 
-        console.log("After saveAnswer - isLastQuestion:", isLastQuestion);
-
-        toast.success(response.message, { position: "top-center" });
+        handleStreakUpdate(response.isCorrect);
 
         if (!isLastQuestion) {
-          console.log("Moving to next question");
           nextQuestion();
-        } else {
-          console.log(
-            "Last question answered! Should show Get My Result button",
-          );
         }
       }
     } catch (error) {
@@ -180,50 +174,82 @@ useEffect(() => {
     }
   };
 
-  const handlePrevious = () => {
-    previousQuestion();
-  };
-
-  const handleNext = () => {
-    if (answeredQuestion) {
-      nextQuestion();
-    } else {
-      toast.error("Please answer the question first", {
-        position: "top-center",
-      });
-    }
-  };
-
-  const handleGetResult = () => {
-    navigate("/result");
-  };
-
-  // useEffect(() => {
-  //   if (timeLeft == 30) {
-  //     nextQuestion();
-  //   }
-  // }, [timeLeft]);
-
   const progressPercent = ((currentIndex + 1) / totalQuestions) * 100;
-  const timerColor = timeLeft <= 10 ? "text-red-600" : "text-[#2c8c72]";
+  const timerColor = timeLeft <= 10 ? "text-red-600" : "text-[#0f766e]";
+
+  const confettiPieces = useMemo(
+    () =>
+      Array.from({ length: 24 }, (_, i) => ({
+        id: i,
+        color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+        left: `${(i * 13) % 100}%`,
+        delay: `${(i % 8) * 0.08}s`,
+      })),
+    [],
+  );
+
+  if (!isReady || !questions?.length) {
+    return (
+      <div className="min-h-screen bg-[#edf4f2] flex items-center justify-center">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-[#0f766e] mb-4" />
+          <p className="text-xl font-semibold text-gray-700">Loading IPL questions...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (isReady && !currentQuestion) {
+    return (
+      <div className="min-h-screen bg-[#edf4f2] flex items-center justify-center">
+        <p className="text-xl font-semibold text-red-600">No question found. Please try again.</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-[#e8ebea] p-6">
-      <div className="max-w-2xl mx-auto">
-        {/* Header */}
-        <div className="flex justify-between items-center mb-8">
-          <h1 className="text-3xl font-bold text-[#2c8c72]">Quiz Challenge</h1>
-          <div
-            className={`flex items-center gap-2 text-2xl font-bold ${timerColor}`}
-          >
-            <Clock size={32} />
+    <div className="min-h-screen bg-[#edf4f2] p-6 relative overflow-hidden">
+      {milestone && (
+        <div className="celebration-overlay pointer-events-none">
+          {confettiPieces.map((piece) => (
+            <span
+              key={piece.id}
+              className="confetti-piece"
+              style={{ backgroundColor: piece.color, left: piece.left, animationDelay: piece.delay }}
+            />
+          ))}
+          <div className="celebration-banner">
+            <Sparkles size={24} />
+            <span>{milestone.label}</span>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-3xl mx-auto">
+        <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4 mb-6">
+          <div>
+            <p className="text-sm font-semibold tracking-widest text-[#f59e0b]">IPL QUIZ</p>
+            <h1 className="text-3xl font-extrabold text-[#0f766e]">Cricket Knowledge Innings</h1>
+          </div>
+          <div className={`flex items-center gap-2 text-2xl font-bold ${timerColor}`}>
+            <Clock size={30} />
             {timeLeft}s
           </div>
         </div>
 
-        {/* Progress Bar */}
+        <Card className="mb-5 p-4 bg-[#083344] text-white border-none shadow-lg">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Flame size={18} className="text-[#fbbf24]" />
+              <p className="font-semibold">Current Streak: {currentStreak}</p>
+            </div>
+            <p className="text-sm text-slate-200">Best this innings: {Math.max(maxStreak, currentStreak)}</p>
+            <p className="text-xs text-slate-300">Milestones: 2, 3 (Hat-trick), 5, 7, 10</p>
+          </div>
+        </Card>
+
         <div className="mb-6">
-          <div className="flex justify-between text-sm text-gray-600 mb-2">
+          <div className="flex justify-between text-sm text-gray-700 mb-2">
             <span>
               Question {currentIndex + 1} of {totalQuestions}
             </span>
@@ -232,67 +258,32 @@ useEffect(() => {
           <Progress value={progressPercent} className="h-2" />
         </div>
 
-        {/* Question Card */}
-        <Card className="p-8 mb-8 shadow-lg">
-          <h2 className="text-2xl font-semibold text-gray-800 mb-8">
-            {currentQuestion?.question || "Loading question..."}
-          </h2>
-
-          {/* Options */}
+        <Card className="p-8 mb-8 shadow-xl border-[#a7f3d0]">
+          <h2 className="text-2xl font-semibold text-gray-900 mb-8">{currentQuestion?.question}</h2>
           <div className="space-y-4">
-            {currentQuestion?.options ? (
-              // New format from backend
-              Object.entries(currentQuestion.options).map(
-                ([label, optionText]) => (
-                  <button
-                    key={label}
-                    onClick={() => setSelectedOption(label)}
-                    disabled={isSubmitting}
-                    className={`w-full p-4 rounded-lg border-2 transition-all text-left font-medium ${
-                      selectedOption === label
-                        ? "border-[#2c8c72] bg-[#2c8c72] text-white"
-                        : "border-gray-300 hover:border-[#2c8c72] bg-white text-gray-800"
-                    } ${isSubmitting ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
-                  >
-                    <span className="font-bold">{label}</span>. {optionText}
-                  </button>
-                ),
-              )
-            ) : // Old format fallback
-            currentQuestion ? (
-              ["option_a", "option_b", "option_c", "option_d"].map(
-                (optionKey, idx) => {
-                  const label = String.fromCharCode(65 + idx);
-                  const optionText = currentQuestion?.[optionKey];
-
-                  return (
-                    <button
-                      key={optionKey}
-                      onClick={() => setSelectedOption(label)}
-                      disabled={isSubmitting}
-                      className={`w-full p-4 rounded-lg border-2 transition-all text-left font-medium ${
-                        selectedOption === label
-                          ? "border-[#2c8c72] bg-[#2c8c72] text-white"
-                          : "border-gray-300 hover:border-[#2c8c72] bg-white text-gray-800"
-                      } ${isSubmitting ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
-                    >
-                      <span className="font-bold">{label}</span>. {optionText}
-                    </button>
-                  );
-                },
-              )
-            ) : (
-              <div className="text-center text-gray-600">Loading option...</div>
-            )}
+            {Object.entries(currentQuestion?.options || {}).map(([label, optionText]) => (
+              <button
+                key={label}
+                onClick={() => setSelectedOption(label)}
+                disabled={isSubmitting}
+                className={`w-full p-4 rounded-lg border-2 transition-all text-left font-medium ${
+                  selectedOption === label
+                    ? "border-[#0f766e] bg-[#0f766e] text-white"
+                    : "border-gray-200 hover:border-[#0f766e] bg-white text-gray-900"
+                } ${isSubmitting ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}
+              >
+                <span className="font-bold">{label}</span>. {optionText}
+              </button>
+            ))}
           </div>
         </Card>
 
         <div className="flex justify-between items-center gap-4">
           <Button
-            onClick={handlePrevious}
+            onClick={previousQuestion}
             disabled={isFirstQuestion || isSubmitting}
             variant="outline"
-            className="flex items-center gap-2 text-[12px] md:text-[16px]"
+            className="flex items-center gap-2"
           >
             <ChevronLeft size={20} />
             Previous
@@ -300,26 +291,26 @@ useEffect(() => {
 
           {isLastQuestion && answeredQuestion ? (
             <Button
-              onClick={handleGetResult}
-              className="bg-[#2c8c72] hover:bg-[#1f6b54] text-white px-8 font-semibold text-lg text-[12px] md:text-[16px]"
+              onClick={() => navigate("/result")}
+              className="bg-[#0f766e] hover:bg-[#115e59] text-white px-8 font-semibold"
             >
-              Get My Result
+              Finish Innings
             </Button>
           ) : (
             <Button
               onClick={handleSubmitAnswer}
               disabled={isSubmitting || !selectedOption}
-              className="bg-[#2c8c72] hover:bg-[#1f6b54] text-white px-8 text-[12px] md:text-[16px]"
+              className="bg-[#0f766e] hover:bg-[#115e59] text-white px-8"
             >
               {isSubmitting ? "Submitting..." : "Submit Answer"}
             </Button>
           )}
 
           <Button
-            onClick={handleNext}
+            onClick={() => (answeredQuestion ? nextQuestion() : toast.error("Answer this question first", { position: "top-center" }))}
             disabled={isLastQuestion || !answeredQuestion || isSubmitting}
-            className="flex items-center gap-2 text-[12px] md:text-[16px]"
             variant="outline"
+            className="flex items-center gap-2"
           >
             Next
             <ChevronRight size={20} />
@@ -331,3 +322,4 @@ useEffect(() => {
 };
 
 export default QuizStarted;
+

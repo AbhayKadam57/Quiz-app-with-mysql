@@ -54,19 +54,24 @@ CREATE TABLE IF NOT EXISTS leaderboard (
   total_score INT DEFAULT 0,
   total_attempts INT DEFAULT 0,
   accuracy DECIMAL(5,2) DEFAULT 0,
+  best_time_taken INT DEFAULT 999999,
+  best_recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id),
   UNIQUE KEY unique_user (user_id)
 );
 
+ALTER TABLE leaderboard ADD COLUMN IF NOT EXISTS best_time_taken INT DEFAULT 999999;
+ALTER TABLE leaderboard ADD COLUMN IF NOT EXISTS best_recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+
 INSERT INTO questions (question_text, option_a, option_b, option_c, option_d, correct_option, marks, order_no) VALUES
-('What is the capital of France?', 'Berlin', 'Madrid', 'Paris', 'Rome', 'C', 10, 1),
-('What does HTML stand for?', 'Hyper Text Markup Language', 'High Tech Modern Language', 'Hyper Transfer Markup Logic', 'None', 'A', 10, 2),
-('What is the largest planet in our solar system?', 'Saturn', 'Jupiter', 'Neptune', 'Uranus', 'B', 10, 3),
-('Who wrote Romeo and Juliet?', 'Jane Austen', 'William Shakespeare', 'Charles Dickens', 'Mark Twain', 'B', 10, 4),
-('What is the chemical symbol for Gold?', 'Ag', 'Au', 'Gd', 'Go', 'B', 10, 5),
-('Which country is home to the Eiffel Tower?', 'Germany', 'Belgium', 'France', 'Switzerland', 'C', 10, 6),
-('What is the smallest prime number?', '1', '2', '3', '5', 'B', 10, 7),
-('What is the capital of Japan?', 'Osaka', 'Kyoto', 'Tokyo', 'Yokohama', 'C', 10, 8),
-('How many continents are there?', '5', '6', '7', '8', 'C', 10, 9),
-('What is the currency of the United Kingdom?', 'Euro', 'Pound Sterling', 'Dollar', 'Franc', 'B', 10, 10);
+('Which team won the inaugural IPL season in 2008?', 'Chennai Super Kings', 'Rajasthan Royals', 'Mumbai Indians', 'Kolkata Knight Riders', 'B', 10, 1),
+('Who is widely known as "Captain Cool" in IPL history?', 'Rohit Sharma', 'MS Dhoni', 'Virat Kohli', 'Shikhar Dhawan', 'B', 10, 2),
+('Which IPL franchise has won the most titles?', 'Mumbai Indians', 'Chennai Super Kings', 'Kolkata Knight Riders', 'Sunrisers Hyderabad', 'A', 10, 3),
+('Who scored the first century in IPL history?', 'Brendon McCullum', 'Chris Gayle', 'AB de Villiers', 'Virender Sehwag', 'A', 10, 4),
+('What is the home ground of Chennai Super Kings?', 'Wankhede Stadium', 'M. A. Chidambaram Stadium', 'Eden Gardens', 'Arun Jaitley Stadium', 'B', 10, 5),
+('Which bowler holds one of the best IPL economy reputations as a spinner for KKR?', 'Sunil Narine', 'Yuzvendra Chahal', 'Rashid Khan', 'Ravichandran Ashwin', 'A', 10, 6),
+('Which award is given to the highest run-scorer in an IPL season?', 'Purple Cap', 'Orange Cap', 'Fair Play Award', 'Most Valuable Player', 'B', 10, 7),
+('Which player is known as "Mr. IPL" for his consistency?', 'Suresh Raina', 'KL Rahul', 'David Warner', 'Faf du Plessis', 'A', 10, 8),
+('Which city is home to the Royal Challengers Bengaluru franchise?', 'Mumbai', 'Bengaluru', 'Hyderabad', 'Jaipur', 'B', 10, 9),
+('How many balls are in a legal over in IPL cricket?', '5', '6', '7', '8', 'B', 10, 10);

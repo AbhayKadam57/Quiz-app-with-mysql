@@ -1,24 +1,49 @@
 import db from "../config/db.js";
 
-// ─────────────────────────────────────────────
-// GET /api/quiz/questions  (Protected)
-// Returns 10 questions WITHOUT correct_option
-// ─────────────────────────────────────────────
+const QUIZ_SIZE = 10;
+
 export const getQuestions = async (req, res) => {
+  const userId = req.user.userId;
+
   try {
-    const [questions] = await db.query(
-      `SELECT id, question_text, option_a, option_b, option_c, option_d, marks, order_no
-       FROM questions
-       ORDER BY order_no ASC
-       LIMIT 10`
+    const [freshPool] = await db.query(
+      `SELECT q.id, q.question_text, q.option_a, q.option_b, q.option_c, q.option_d, q.marks, q.order_no
+       FROM questions q
+       WHERE q.id NOT IN (
+         SELECT ua.question_id
+         FROM user_answers ua
+         INNER JOIN quiz_sessions qs ON qs.id = ua.session_id
+         WHERE qs.user_id = ?
+           AND DATE(qs.started_at) = CURDATE()
+       )
+       ORDER BY RAND()
+       LIMIT ?`,
+      [userId, QUIZ_SIZE],
     );
 
-    if (questions.length === 0) {
-      return res.status(404).json({ success: false, message: 'No questions found.' });
+    let questions = freshPool;
+
+    if (questions.length < QUIZ_SIZE) {
+      const needed = QUIZ_SIZE - questions.length;
+      const takenIds = questions.map((q) => q.id);
+
+      const [fallbackPool] = await db.query(
+        `SELECT q.id, q.question_text, q.option_a, q.option_b, q.option_c, q.option_d, q.marks, q.order_no
+         FROM questions q
+         ${takenIds.length ? `WHERE q.id NOT IN (${takenIds.map(() => "?").join(",")})` : ""}
+         ORDER BY RAND()
+         LIMIT ?`,
+        takenIds.length ? [...takenIds, needed] : [needed],
+      );
+
+      questions = [...questions, ...fallbackPool];
     }
 
-    // Map to cleaner format for frontend
-    const formatted = questions.map((q) => ({
+    if (questions.length === 0) {
+      return res.status(404).json({ success: false, message: "No questions found." });
+    }
+
+    const formatted = questions.map((q, idx) => ({
       id: q.id,
       question: q.question_text,
       options: {
@@ -28,7 +53,7 @@ export const getQuestions = async (req, res) => {
         D: q.option_d,
       },
       marks: q.marks,
-      order: q.order_no,
+      order: idx + 1,
     }));
 
     res.status(200).json({
@@ -36,9 +61,8 @@ export const getQuestions = async (req, res) => {
       total: formatted.length,
       questions: formatted,
     });
-
   } catch (err) {
-    console.error('getQuestions Error:', err.message);
-    res.status(500).json({ success: false, message: 'Error fetching questions.' });
+    console.error("getQuestions Error:", err.message);
+    res.status(500).json({ success: false, message: "Error fetching questions." });
   }
 };
